@@ -1,5 +1,11 @@
 #    Facial Emotion Detection
-    
+
+-- install the DeepFace Library--
+
+    %pip install opencv-python deepface tf-keras
+
+--import the required libraries--
+
     import cv2
     import os
     import numpy as np
@@ -7,11 +13,11 @@
     from google.colab.patches import cv2_imshow
     from collections import Counter
 
-    def analyze_frame(frame):
 """
 Analyzes a single frame for emotions and draws colored bounding boxes.
 """
 
+        def analyze_frame(frame):
         try:
 DeepFace.analyze returns a list of dicts (one per face)
 
