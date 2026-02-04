@@ -57,11 +57,11 @@ Set Yellow for Neutral Emotion
             
 Draw the rectangle on the frame
 
-                cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 3)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
             
 Optional: Add text label above the box
 
-                cv2.putText(frame, dom_emotion.upper(), (x, y - 10), 
+                cv2.putText(frame, dom_emotion.capitalize(), (x, y - 10), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
 
 --- Mask Detection Logic ---
