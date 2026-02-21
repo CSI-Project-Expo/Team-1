@@ -1,4 +1,4 @@
-#    Facial Emotion and body Movement Detection
+#    Facial Emotion and Body Movement Detection
 
 --Upgrade pip first--
 
