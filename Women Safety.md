@@ -1,129 +1,171 @@
-#    Facial Emotion Detection
+#    Facial Emotion and body Movement Detection
 
--- install the DeepFace Library--
+--Upgrade pip first--
+
+    !pip install --upgrade pip
+
+--instal deepface and dlib libraries--
 
     %pip install opencv-python deepface tf-keras
+    %pip install opencv-python dlib numpy
 
 --import the required libraries--
 
     import cv2
+    import dlib
     import os
     import numpy as np
     from deepface import DeepFace
-    from google.colab.patches import cv2_imshow
     from collections import Counter
+    from google.colab.patches import cv2_imshow
 
-"""
-Analyzes a single frame for emotions and draws colored bounding boxes.
-"""
 
-        def analyze_frame(frame):
+
+--Load Dlib's face detector and the facial landmark predictor once for efficiency--
+
+    if not os.path.exists("shape_predictor_68_face_landmarks.dat"):
+        print("Downloading dlib model...")
+        !wget http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
+        !bzip2 -d shape_predictor_68_face_landmarks.dat.bz2
+
+    detector = dlib.get_frontal_face_detector()
+    predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+
+    def get_facial_movement_score(landmarks):
+    
+---Calculates a movement score based on mouth opening distance---
+    
+        points = landmarks.parts()
+        mouth_top = points[51].y
+        mouth_bottom = points[57].y
+        return abs(mouth_bottom - mouth_top)
+
+    def analyze_and_process(frame):
+    
+---Main function merging emotion analysis and movement detection for multiple people in a single frame---
+    
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        unsafe_emotions = {'angry', 'sad', 'fear', 'disgust'}
+        emotions_in_frame = []
+
         try:
-DeepFace.analyze returns a list of dicts (one per face)
-
-            results = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False)
+1. Analyze Emotions using DeepFace
+---enforce_detection=False allows the code to continue even if no face is clear---
         
-            unsafe_emotions = {'angry', 'sad', 'fear', 'disgust'}
-            emotions_in_frame = []
+            results = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False)
 
             for i, res in enumerate(results):
                 dom_emotion = res['dominant_emotion']
+                emotion_confidence = res['emotion'][dom_emotion] # Get confidence score
                 emotions_in_frame.append(dom_emotion)
 
---- Feature 1 & 2: Bounding Boxes ---
-Extract face coordinates (x, y, w, h)
-
+--Extract coordinates for the bounding box--
+            
                 region = res['region']
                 x, y, w, h = region['x'], region['y'], region['w'], region['h']
-            
-Default color (Green for Happy/Surprise/Other)
 
-                box_color = (0, 255, 0) 
-            
-Set Red for Unsafe Emotions
+--Default state: Normal (Green)--
 
-                if dom_emotion in unsafe_emotions:
-                    box_color = (0, 0, 255) # BGR for Red
-                    print(f"⚠️ ALERT: Unsafe Emotion ({dom_emotion}) on Person {i+1}")
-            
-Set Yellow for Neutral Emotion
+                box_color = (0, 255, 0)
+                status_text = "" # Initialize status_text to be filled by conditions
 
-                elif dom_emotion == 'neutral':
-                    box_color = (0, 255, 255) # BGR for Yellow
-                    print(f"⚠️ ALERT: Neutral Emotion ({dom_emotion}) on Person {i+1}")
+2. Analyze Movements using Dlib
 
-                else:
-                    print(f"The person {i+1} is normal")
-            
-Draw the rectangle on the frame
+                dlib_rect = dlib.rectangle(x, y, x + w, y + h)
+                is_dangerous_movement = False # Flag to prioritize Dlib alert
+                try:
+                    landmarks = predictor(gray, dlib_rect)
+                    movement_score = get_facial_movement_score(landmarks)
 
+   --Check for Unusual Movement Alert--
+   
+                    if movement_score > 30: # Adjust this threshold based on resolution/need
+                        box_color = (0, 0, 255) # Red for Danger
+                        status_text = "DANGEROUS MOVEMENT!"
+                        print(f"!!! ALERT: Unusual movement detected on Person {i+1} !!!")
+                        is_dangerous_movement = True
+                except:
+                    pass
+
+3. Check for Unsafe Emotion, Neutral, or Mask Alerts if no dangerous movement
+
+                if not is_dangerous_movement:
+                    if dom_emotion in unsafe_emotions:
+                        box_color = (0, 0, 255) # Red
+                        status_text = f"ALERT: {dom_emotion.upper()} ({emotion_confidence:.2f}%)"
+                        print(f"⚠️ ALERT: {dom_emotion} emotion ({emotion_confidence:.2f}%) on Person {i+1}")
+                    elif dom_emotion == 'neutral': # Neutral emotion - now explicitly handled
+                        box_color = (0, 255, 255) # Yellow
+                        status_text = f"Neutral ({emotion_confidence:.2f}%)"
+                        print(f"⚠️ ALERT: Neutral emotion ({emotion_confidence:.2f}%) on Person {i+1}")
+                    elif emotion_confidence < 45: # Mask/Occlusion detection based on low confidence
+                        box_color = (230,216,173) # Beige/Light Brown
+                        status_text = f"Mask/Occlusion ({emotion_confidence:.2f}%)"
+                        print(f"😷 ALERT: Mask/Occlusion detected ({emotion_confidence:.2f}%) on Person {i+1}")
+                    else: # Default for normal emotions (happy, surprise)
+                        box_color = (0, 255, 0) # Green
+                        status_text = f"{dom_emotion.capitalize()} ({emotion_confidence:.2f}%)"
+   
+                    # No console print for normal emotions to avoid clutter
+
+   --Draw Visuals--
+   
                 cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
-            
-Optional: Add text label above the box
+                cv2.putText(frame, status_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2) # Adjusted y-coordinate and font scale
 
-                cv2.putText(frame, dom_emotion.capitalize(), (x, y - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
-
---- Mask Detection Logic ---
-
-                emotion_confidence = res['emotion'][dom_emotion]
-                if emotion_confidence < 45:
-                    print(f"😷 ALERT: Mask/Occlusion detected on Person {i+1}")
-
---- Group Synchrony Check ---
+4. Group Analysis
 
             if len(emotions_in_frame) > 1:
                 counts = Counter(emotions_in_frame)
                 for emo, count in counts.items():
-                    if count > 1:
-                        print(f"🚨 GROUP ALERT: {count} people are showing '{emo}'")
-                    else:
-                    print("Keep going! People are probably normal.")
-
-            return len(results), emotions_in_frame
+                    if count > 1 and emo in unsafe_emotions:
+                        print(f"🚨 GROUP ALERT: {count} people are showing '{emo}' simultaneously!")
 
         except Exception as e:
-        return 0, []
+--Occurs if DeepFace cannot process the frame correctly--
 
-    def process_dataset(directory_path):
+            pass
+
+        return frame
+
+    def run_safety_analysis(folder_path):
+--Processes all images and videos in the specified directory--
+
         image_exts = ('.jpg', '.jpeg', '.png', '.bmp')
         video_exts = ('.mp4', '.avi', '.mov', '.mkv')
 
-        if not os.path.exists(directory_path):
-            print(f"Error: Path '{directory_path}' not found.")
+        if not os.path.exists(folder_path):
+            print(f"Error: Folder '{folder_path}' not found.")
             return
 
-        for filename in os.listdir(directory_path):
-            file_path = os.path.join(directory_path, filename)
+        for filename in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, filename)
             ext = os.path.splitext(filename)[1].lower()
 
             if ext in image_exts:
-                print(f"\n--- 📷 Processing Image: {filename} ---")
-                frame = cv2.imread(file_path)
-                if frame is not None:
-                    analyze_frame(frame)
-                    cv2_imshow(frame) # Now displays with colored boxes
+                print(f"\nProcessing Image: {filename}")
+                img = cv2.imread(file_path)
+                if img is not None:
+                    processed_img = analyze_and_process(img)
+                    cv2_imshow(processed_img)
 
             elif ext in video_exts:
-                print(f"\n--- 🎥 Processing Video: {filename} ---")
+                print(f"\nProcessing Video: {filename}")
                 cap = cv2.VideoCapture(file_path)
                 frame_count = 0
-            
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: break
-                
-                    if frame_count % 15 == 0: # Increased interval for faster display
-                        analyze_frame(frame)
-                        cv2_imshow(frame) # Display frames with boxes
-                
+
+--Process every 10th frame to speed up video analysis in Colab--
+
+                    if frame_count % 10 == 0:
+                        processed_frame = analyze_and_process(frame)
+                        cv2_imshow(processed_frame)
                     frame_count += 1
-                    if cv2.waitKey(1) & 0xFF == ord('q'): break
-            
                 cap.release()
 
---- Execution ---
-Update this with your actual folder path
+--- EXECUTION ---
+Replace this with the path to your dataset folder
 
-    dataset_path = "/content/dataset" 
-    process_dataset(dataset_path)
+    run_safety_analysis('/content/dataset')
