@@ -1,29 +1,20 @@
--- ADITIONAL LIBRARIES --
-
-    from google.colab.output import eval_js, register_callback
-    from base64 import b64decode, b64encode
-    from IPython.display import display, Javascript
 
 --- SETUP MODELS ---
-    
+
     detector = dlib.get_frontal_face_detector()
     predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
---Global flag to signal stopping--
-    
     stop_signal = False
 
     def stop_stream_callback():
         global stop_signal
-      stop_signal = True
-      print("Stopping stream via button...")
+        stop_signal = True
+        print("Stopping stream via button...")
 
---Register the Python function to be called from JavaScript--
+Register the Python function to be called from JavaScript
     
     register_callback('stop_stream', stop_stream_callback)
 
---JavaScript to start the webcam and capture frames--
-    
     JS_CODE = """
     var video;
     var canvas;
@@ -36,7 +27,7 @@
       video.style.display = 'block';
       video.width = 640;
       video.height = 480;
-  
+
       try {
         stream = await navigator.mediaDevices.getUserMedia({video: true});
       } catch (err) {
@@ -47,14 +38,13 @@
 
       div = document.createElement('div');
       div.appendChild(video);
-  
-  --Add a stop button--
-  
+
+Add a stop button
+
       var button = document.createElement('button');
       button.textContent = 'Stop Stream';
       button.onclick = () => {
-  Call Python function to stop the stream
-          
+
         google.colab.kernel.invokeFunction('stop_stream', []);
         if (stream) {
           stream.getTracks().forEach(track => track.stop()); // Stop video stream in browser
@@ -80,22 +70,21 @@
       return canvas.toDataURL('image/jpeg', 0.8);
     }
     """
-
+Converts the JavaScript frame to an OpenCV image
+    
     def js_to_image(js_reply):
---Converts the JavaScript frame to an OpenCV image--
-        
         image_bytes = b64decode(js_reply.split(',')[1])
         jpg_as_np = np.frombuffer(image_bytes, dtype=np.uint8)
         return cv2.imdecode(jpg_as_np, flags=1)
 
+Logic to detect unusual mouth movement
+    
     def get_movement_score(landmarks):
---Logic to detect unusual mouth movement--
-
         points = landmarks.parts()
         return abs(points[57].y - points[51].y)
 
 Initialize Webcam
-    
+
     display(Javascript(JS_CODE))
     eval_js('startWebcam()')
 
@@ -108,12 +97,7 @@ Initialize Webcam
                 print("Exiting live stream loop.")
                 break
 
-Capture frame from webcam via JavaScript
-    
             js_frame = eval_js('captureFrame()')
-
-If js_frame is empty, it means the video stream in JS has likely stopped or failed.
-Check stop_signal again to differentiate between intentional stop and error.
 
             if not js_frame:
                 if stop_signal: # User clicked stop button and JS also stopped
@@ -127,48 +111,50 @@ Check stop_signal again to differentiate between intentional stop and error.
 
 1. Emotion Detection (DeepFace)
 
-             try:
-                 results = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False, silent=True)
-                 for res in results:
-                     emotion = res['dominant_emotion']
-                     x, y, w, h = res['region']['x'], res['region']['y'], res['region']['w'], res['region']['h']
+            try:
+                results = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False, silent=True)
+                for res in results:
+                    emotion = res['dominant_emotion']
+                    x, y, w, h = res['region']['x'], res['region']['y'], res['region']['w'], res['region']['h']
 
-2. Movement Detection (Dlib)
-   
-                     rect = dlib.rectangle(x, y, x + w, y + h)
-                     status_text = emotion.capitalize()
-                     color = (0, 255, 0) # Normal
+   2. Movement Detection (Dlib)
+      
+                    rect = dlib.rectangle(x, y, x + w, y + h)
+                    status_text = emotion.capitalize()
+                    color = (0, 255, 0) # Normal
 
-                     try:
-                         landmarks = predictor(gray, rect)
-                         if get_movement_score(landmarks) > 60:
-                             status_text = "UNUSUAL MOVEMENT"
-                             color = (0, 0, 255)
-                     except:
-                         pass
+                    try:
+                        landmarks = predictor(gray, rect)
+                        if get_movement_score(landmarks) > 60:
+                            status_text = "UNUSUAL MOVEMENT"
+                            color = (0, 0, 255)
+                    except:
+                        pass
 
-                     if emotion in unsafe_emotions and status_text != "UNUSUAL MOVEMENT":
-                         color = (0, 0, 255)
-                         status_text = f"ALERT: {emotion.upper()}"
+                    if emotion in unsafe_emotions and status_text != "UNUSUAL MOVEMENT":
+                        color = (0, 0, 255)
+                        status_text = f"ALERT: {emotion.upper()}"
 
-                     elif emotion == 'neutral':
-                              color = (0, 255, 255)
+                    elif emotion == 'neutral':
+                            color = (0, 255, 255)
 
-                     if color == (0, 0, 255):
-                         print(f"Alert triggered: {status_text}")
+                    if color == (0, 0, 255):
+                        print(f"Alert triggered: {status_text}")
 
-                     elif color == (0, 255, 255):
-                             print("Neutral Emotion Alert")
+                    elif color == (0, 255, 255):
+                            print("Neutral Emotion Alert")
 
-                     else:
-                         print(f"Status: {status_text}")
+                    else:
+                        print(f"Status: {status_text}")
 
             except Exception as e:
-                 continue
+                continue
+      
+To stop the live stream
 
-       except KeyboardInterrupt:
-           print("Stream stopped by KeyboardInterrupt.")
+    except KeyboardInterrupt:
+        print("Stream stopped by KeyboardInterrupt.")
    
-       finally:
-          stop_signal = False
-          print("Live detection session ended.")
+    finally:
+        stop_signal = False
+        print("Live detection session ended.")
