@@ -1,3 +1,8 @@
+ADDITIONAL MODULES
+
+    from google.colab.output import eval_js, register_callback
+    from base64 import b64decode, b64encode
+    from IPython.display import display, Javascript
 
 --- SETUP MODELS ---
 
