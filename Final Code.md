@@ -24,7 +24,7 @@ Import the Libraries
     predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
 
     HARSH_WORDS = ["leave", "help", "weired", "danger", "stop", "attack", "scared", "kill"]
-
+    SHOUTING_THRESHOLD_DBFS = -15.0
 --- VISUAL PROCESSING FUNCTIONS ---
 Calculates a movement score based on mouth opening distance
 
@@ -104,32 +104,44 @@ Analyzes a single frame for emotions, movements, and masks
         return frame
 
 --- AUDIO PROCESSING FUNCTIONS ---
-    Extracts text and checks for harsh words in audio/video files
+Calculates the average loudness of an audio segment and checks if it exceeds a threshold
 
+    def detect_shouting(audio_segment, threshold_dbfs):
+        average_loudness = audio_segment.dBFS
+        return average_loudness > threshold_dbfs
+Extracts text and checks for harsh words in audio/video files
+    
     def process_audio(file_path):
         recognizer = sr.Recognizer()
         temp_wav = "temp_audio_conversion.wav"
-
+        audio_segment = None
+        is_shouting = False
+        
         try:
             if file_path.lower().endswith(('.mp4', '.mkv', '.mov', '.avi')):
                 video = VideoFileClip(file_path)
-                if video.audio is None: return None, "NO_AUDIO_TRACK_FOUND"
+                if video.audio is None: return None, [], False
                 video.audio.write_audiofile(temp_wav, codec='pcm_s16le', verbose=False, logger=None)
                 audio_target = temp_wav
+                audio_segment = AudioSegment.from_file(temp_wav)
             else:
                 audio = AudioSegment.from_file(file_path)
-                audio.export(temp_wav, format="wav")
+                audio_segment.export(temp_wav, format="wav")
                 audio_target = temp_wav
+                
+            is_shouting = detect_shouting(audio_segment, SHOUTING_THRESHOLD_DBFS)
 
             with sr.AudioFile(audio_target) as source:
                 audio_data = recognizer.record(source)
                 text = recognizer.recognize_google(audio_data).lower()
 
             found_words = [word for word in HARSH_WORDS if word in text]
-            return text, found_words
+            return text, found_words, is_shouting
 
+        except sr.UnknownValueError:
+            return None, [], False 
         except Exception as e:
-            return None, str(e)
+            return None, [], False
         finally:
             if os.path.exists(temp_wav): os.remove(temp_wav)
 
@@ -159,8 +171,17 @@ Analyzes a single frame for emotions, movements, and masks
                     cv2_imshow(processed_img) # Uncommented
 
             elif ext in video_exts:
-                text, words = process_audio(file_path)
-                if words: print(f"   ⚠️ AUDIO ALERT! Harsh words found: {', '.join(words)}")
+                text, words, is_shouting = process_audio(file_path)
+                audio_alerts = []
+                if is_shouting and words:
+                    audio_alerts.append(f"⚠️ SHOUTING IN ANGER! Harsh words: {', '.join(words)}")
+                elif is_shouting:
+                    audio_alerts.append("⚠️ SHOUTING DETECTED! High volume.")
+                elif words:
+                    audio_alerts.append(f"⚠️ AUDIO ALERT! Harsh words found: {', '.join(words)}")
+
+                if audio_alerts:
+                    print(f"   {' '.join(audio_alerts)}")
 
                 cap = cv2.VideoCapture(file_path)
                 frame_count = 0
@@ -176,11 +197,21 @@ Analyzes a single frame for emotions, movements, and masks
 2. Audio-Only Analysis
    
             elif ext in audio_only_exts:
-                text, words = process_audio(file_path)
-                if text:
-                    status = f"⚠️ ALERT: {', '.join(words)}" if words else "✅ CLEAN"
-                    print(f"   [{status}] Transcription: {text}")
-
+                text, words, is_shouting = process_audio(file_path)
+                audio_alerts = []
+                if is_shouting and words:
+                    audio_alerts.append(f"⚠️ SHOUTING IN ANGER! Harsh words: {', '.join(words)}")
+                elif is_shouting:
+                    audio_alerts.append("⚠️ SHOUTING DETECTED! High volume.")
+                elif words:
+                    audio_alerts.append(f"⚠️ AUDIO ALERT! Harsh words found: {', '.join(words)}")
+            
+                if audio_alerts:
+                    print(f"   [{' '.join(audio_alerts)}] Transcription: {text if text else 'N/A'}")
+                elif text:
+                    print(f"   [✅ CLEAN] Transcription: {text}")
+                else:
+                    print(f"   [❌ NO AUDIO/SPEECH DETECTED]")
         print("\n✅ Dataset Analysis Complete.")
 
 Run the analysis
