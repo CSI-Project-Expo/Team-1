@@ -3,21 +3,101 @@ Install the required Libraries
     %pip install opencv-python deepface tf-keras
     %pip install opencv-python dlib numpy
     !pip install SpeechRecognition pydub moviepy
+    !
+    !apt-get update && apt-get install -y portaudio19-dev
+    !pip install PyAudio
 Import the Libraries
 
-    import os
     import cv2
     import dlib
+    import os
+    import numpy as np
     from deepface import DeepFace
     from collections import Counter
+    from pydub import AudioSegment
     import speech_recognition as sr
     from moviepy.editor import VideoFileClip
-    from pydub import AudioSegment
+    import threading
+    import queue
+    import time
     from google.colab.patches import cv2_imshow
+
+    
+    stop_signal = False
+
+    def stop_stream_callback():
+        global stop_signal
+        stop_signal = True
+        print("Stopping stream via button...")
+
+JavaScript to start the webcam and capture frames
+
+    JS_CODE = """
+    var video;
+    var canvas;
+    var div = null;
+    var stream = null;
+    
+    async function startWebcam() {
+      if (div) { div.remove(); } // Remove existing div if any
+      video = document.createElement('video');
+      video.style.display = 'block';
+      video.width = 640;
+      video.height = 480;
+    
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({video: true});
+      } catch (err) {
+        console.error("Error accessing camera: ", err);
+        alert("Could not access camera. Please ensure camera permissions are granted.");
+        return;
+      }
+
+      div = document.createElement('div');
+      div.appendChild(video);
+
+      var button = document.createElement('button');
+      button.textContent = 'Stop Stream';
+      button.onclick = () => {
+        google.colab.kernel.invokeFunction('stop_stream', []);
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop()); // Stop video stream in browser
+        }
+        if (div) { div.remove(); } // Remove the video element from the DOM
+      };
+      div.appendChild(button);
+
+      document.body.appendChild(div);
+      video.srcObject = stream;
+      await video.play();
+
+      canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    async function captureFrame() {
+      if (!stream || !video.srcObject) {
+        return ''; // Return empty if stream is not active
+      }
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      return canvas.toDataURL('image/jpeg', 0.8);
+    }
+    """    
+Converts the JavaScript frame to an OpenCV image
+
+    def js_to_image(js_reply):
+        image_bytes = b64decode(js_reply.split(',')[1])
+        jpg_as_np = np.frombuffer(image_bytes, dtype=np.uint8)
+        return cv2.imdecode(jpg_as_np, flags=1)
+
+--- INITIALIZATION & CONFIGURATION ---
 
     if not os.path.exists("shape_predictor_68_face_landmarks.dat"):
         print("Downloading dlib model...")
         !wget http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
+        import time
+        time.sleep(1) # Add a small delay
         !bzip2 -d shape_predictor_68_face_landmarks.dat.bz2
 
     detector = dlib.get_frontal_face_detector()
@@ -25,7 +105,9 @@ Import the Libraries
 
     HARSH_WORDS = ["leave", "help", "weired", "danger", "stop", "attack", "scared", "kill"]
     SHOUTING_THRESHOLD_DBFS = -15.0
---- VISUAL PROCESSING FUNCTIONS ---
+
+--- CORE PROCESSING FUNCTIONS ---
+
 Calculates a movement score based on mouth opening distance
 
     def get_facial_movement_score(landmarks):
@@ -33,7 +115,7 @@ Calculates a movement score based on mouth opening distance
         mouth_top = points[51].y
         mouth_bottom = points[57].y
         return abs(mouth_bottom - mouth_top)
-Analyzes a single frame for emotions, movements, and masks
+Analyzes a single frame for emotions and movements
 
     def analyze_visuals(frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -42,8 +124,7 @@ Analyzes a single frame for emotions, movements, and masks
 
         try:
             results = DeepFace.analyze(frame, actions=['emotion'], enforce_detection=False)
-
-            for i, res in enumerate(results):
+            for res in results:
                 dom_emotion = res['dominant_emotion']
                 emotion_confidence = res['emotion'][dom_emotion]
                 emotions_in_frame.append(dom_emotion)
@@ -51,24 +132,20 @@ Analyzes a single frame for emotions, movements, and masks
                 region = res['region']
                 x, y, w, h = region['x'], region['y'], region['w'], region['h']
 
-            # Logic for Visual Alerts
-                box_color = (0, 255, 0) # Default Green
+                box_color = (0, 255, 0) # Green
                 status_text = ""
                 is_dangerous_movement = False
 
-            # Check Movement
                 try:
                     dlib_rect = dlib.rectangle(x, y, x + w, y + h)
                     landmarks = predictor(gray, dlib_rect)
                     movement_score = get_facial_movement_score(landmarks)
-                    if movement_score > 65:
+                    if movement_score > 79:
                         box_color = (0, 0, 255) # Red
                         status_text = "DANGEROUS MOVEMENT!"
                         is_dangerous_movement = True
-                except:
-                    pass
+                except: pass
 
-            # Check Emotions/Masks if no movement alert
                 if not is_dangerous_movement:
                     if dom_emotion in unsafe_emotions:
                         box_color = (0, 0, 255)
@@ -85,70 +162,60 @@ Analyzes a single frame for emotions, movements, and masks
                 cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
                 cv2.putText(frame, status_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
-            # Add conditional print statements
                 if box_color == (0, 0, 255) or box_color == (0, 255, 255):
                     print(f"   Alert triggered: {status_text}")
                 elif box_color == (0, 255, 0):
                     print("You are Safe! Keep going")
-  
-        # Group Analysis
+
             if len(emotions_in_frame) > 1:
                 counts = Counter(emotions_in_frame)
                 for emo, count in counts.items():
                     if count > 1 and emo in unsafe_emotions:
                         print(f"🚨 GROUP ALERT: {count} people showing '{emo}'!")
-
-        except Exception:
-            pass
-
+        except: pass
         return frame
+Extracts text, checks for harsh words, and detects shouting in audio/video files
 
---- AUDIO PROCESSING FUNCTIONS ---
-Calculates the average loudness of an audio segment and checks if it exceeds a threshold
-
-    def detect_shouting(audio_segment, threshold_dbfs):
-        average_loudness = audio_segment.dBFS
-        return average_loudness > threshold_dbfs
-Extracts text and checks for harsh words in audio/video files
-    
-    def process_audio(file_path):
+    def process_audio_file(file_path):
         recognizer = sr.Recognizer()
         temp_wav = "temp_audio_conversion.wav"
         audio_segment = None
         is_shouting = False
-        
+
         try:
             if file_path.lower().endswith(('.mp4', '.mkv', '.mov', '.avi')):
                 video = VideoFileClip(file_path)
                 if video.audio is None: return None, [], False
                 video.audio.write_audiofile(temp_wav, codec='pcm_s16le', verbose=False, logger=None)
-                audio_target = temp_wav
                 audio_segment = AudioSegment.from_file(temp_wav)
             else:
-                audio = AudioSegment.from_file(file_path)
+                audio_segment = AudioSegment.from_file(file_path)
                 audio_segment.export(temp_wav, format="wav")
-                audio_target = temp_wav
-                
-            is_shouting = detect_shouting(audio_segment, SHOUTING_THRESHOLD_DBFS)
 
-            with sr.AudioFile(audio_target) as source:
+            if audio_segment:
+                is_shouting = audio_segment.dBFS > SHOUTING_THRESHOLD_DBFS
+
+            found_words = []
+            text = ""
+            with sr.AudioFile(temp_wav) as source:
                 audio_data = recognizer.record(source)
                 text = recognizer.recognize_google(audio_data).lower()
+                found_words = [word for word in HARSH_WORDS if word in text]
 
-            found_words = [word for word in HARSH_WORDS if word in text]
             return text, found_words, is_shouting
 
         except sr.UnknownValueError:
-            return None, [], False 
-        except Exception as e:
+            return None, [], False
+        except Exception:
             return None, [], False
         finally:
             if os.path.exists(temp_wav): os.remove(temp_wav)
 
---- MAIN EXECUTION ---
-    Main function to process visual and audio safety in a dataset
+--- MODE 1: DATASET PROCESSING ---
 
-    def run_combined_safety_analysis(folder_path):
+Processes images, videos, and audio files in a directory
+
+    def run_dataset_analysis(folder_path):
         if not os.path.exists(folder_path):
             print("❌ Folder not found.")
             return
@@ -160,18 +227,16 @@ Extracts text and checks for harsh words in audio/video files
         for filename in os.listdir(folder_path):
             file_path = os.path.join(folder_path, filename)
             ext = os.path.splitext(filename)[1].lower()
-            print(f"\n🔍 ANALYZING: {filename}")
+            print(f"\nℹ️ ANALYZING: {filename}")
 
-1. Visual Analysis (Images and Videos)
-   
             if ext in image_exts:
                 img = cv2.imread(file_path)
                 if img is not None:
                     processed_img = analyze_visuals(img)
-                    cv2_imshow(processed_img) # Uncommented
+                    cv2_imshow(processed_img)
 
             elif ext in video_exts:
-                text, words, is_shouting = process_audio(file_path)
+                text, words, is_shouting = process_audio_file(file_path)
                 audio_alerts = []
                 if is_shouting and words:
                     audio_alerts.append(f"⚠️ SHOUTING IN ANGER! Harsh words: {', '.join(words)}")
@@ -190,14 +255,12 @@ Extracts text and checks for harsh words in audio/video files
                     if not ret: break
                     if frame_count % 30 == 0: # Increased interval to 30 for performance
                         processed_frame = analyze_visuals(frame)
-                        cv2_imshow(processed_frame) # Uncommented
+                        cv2_imshow(processed_frame)
                     frame_count += 1
                 cap.release()
 
-2. Audio-Only Analysis
-   
             elif ext in audio_only_exts:
-                text, words, is_shouting = process_audio(file_path)
+                text, words, is_shouting = process_audio_file(file_path)
                 audio_alerts = []
                 if is_shouting and words:
                     audio_alerts.append(f"⚠️ SHOUTING IN ANGER! Harsh words: {', '.join(words)}")
@@ -205,15 +268,68 @@ Extracts text and checks for harsh words in audio/video files
                     audio_alerts.append("⚠️ SHOUTING DETECTED! High volume.")
                 elif words:
                     audio_alerts.append(f"⚠️ AUDIO ALERT! Harsh words found: {', '.join(words)}")
-            
+
                 if audio_alerts:
                     print(f"   [{' '.join(audio_alerts)}] Transcription: {text if text else 'N/A'}")
                 elif text:
                     print(f"   [✅ CLEAN] Transcription: {text}")
                 else:
                     print(f"   [❌ NO AUDIO/SPEECH DETECTED]")
+
         print("\n✅ Dataset Analysis Complete.")
 
-Run the analysis
+--- MODE 2: LIVE STREAM PROCESSING ---
 
-    run_combined_safety_analysis('/content/drive/MyDrive/Women Safety/train/fear')
+Accesses system camera and microphone for real-time analysis (Colab compatible)
+
+    def start_live_stream():
+        global stop_signal
+        print("Live detection started. (DeepFace + Dlib)")
+
+        display(Javascript(JS_CODE))
+        eval_js('startWebcam()')
+        register_callback('stop_stream', stop_stream_callback)
+
+        try:
+            stop_signal = False # Ensure stop_signal is reset at the start of the try block
+            while True:
+                if stop_signal:
+                    print("Exiting live stream loop.")
+                    break
+
+                js_frame = eval_js('captureFrame()')
+
+                if not js_frame:
+                    if stop_signal: # User clicked stop button and JS also stopped
+                        break
+                    else: # Unexpected error or stream closed from browser
+                        print("Warning: No frame captured from webcam, stream might be disconnected. Stopping.")
+                        break # Or handle error more robustly
+
+                frame = js_to_image(js_frame)
+
+                processed_frame = analyze_visuals(frame)
+                cv2_imshow(processed_frame) # Display the frame with annotations
+
+        except KeyboardInterrupt:
+            print("Stream stopped by KeyboardInterrupt.")
+        finally:
+            stop_signal = False
+            print("Live detection session ended.")
+
+--- MAIN INTERFACE ---
+
+    if __name__ == "__main__":
+        print("--- Safety Analysis System ---")
+        print("1. Analyze Dataset (Folder)")
+        print("2. Start Live Stream (Camera/Mic)")
+
+        choice = input("Select an option (1 or 2): ")
+
+        if choice == '1':
+            path = input("Enter the folder path: ")
+            run_dataset_analysis(path)
+        elif choice == '2':
+            start_live_stream()
+        else:
+            print("Invalid choice.")
