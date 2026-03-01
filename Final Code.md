@@ -21,47 +21,61 @@ Import the Libraries
     import queue
     import time
     from google.colab.patches import cv2_imshow
+    import io
+    import base64
 
-    
+Global flag to signal stopping
+
     stop_signal = False
+
+Global queue for audio chunks and thread management
+
+    audio_queue = queue.Queue()
+    audio_processing_thread = None
+    audio_stop_event = threading.Event()
 
     def stop_stream_callback():
         global stop_signal
         stop_signal = True
         print("Stopping stream via button...")
-
-JavaScript to start the webcam and capture frames
+    
+JavaScript to start the webcam and capture frames, with audio
 
     JS_CODE = """
     var video;
     var canvas;
     var div = null;
     var stream = null;
-    
+    var mediaRecorder = null;
+    var audioChunks = [];
+
     async function startWebcam() {
       if (div) { div.remove(); } // Remove existing div if any
       video = document.createElement('video');
       video.style.display = 'block';
       video.width = 640;
       video.height = 480;
-    
+
       try {
-        stream = await navigator.mediaDevices.getUserMedia({video: true});
+        stream = await navigator.mediaDevices.getUserMedia({video: true, audio: true});
       } catch (err) {
-        console.error("Error accessing camera: ", err);
-        alert("Could not access camera. Please ensure camera permissions are granted.");
+        console.error("Error accessing camera/microphone: ", err);
+        alert("Could not access camera/microphone. Please ensure permissions are granted.");
         return;
       }
 
       div = document.createElement('div');
       div.appendChild(video);
-
+    
       var button = document.createElement('button');
       button.textContent = 'Stop Stream';
       button.onclick = () => {
         google.colab.kernel.invokeFunction('stop_stream', []);
         if (stream) {
-          stream.getTracks().forEach(track => track.stop()); // Stop video stream in browser
+          stream.getTracks().forEach(track => track.stop());
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+          }
         }
         if (div) { div.remove(); } // Remove the video element from the DOM
       };
@@ -74,6 +88,36 @@ JavaScript to start the webcam and capture frames
       canvas = document.createElement('canvas');
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
+
+      startAudioRecording();
+    }
+
+    function startAudioRecording() {
+      if (!stream) {
+        console.error("Stream not available for audio recording.");
+        return;
+      }
+
+      mediaRecorder = new MediaRecorder(stream);
+      audioChunks = [];
+
+      mediaRecorder.ondataavailable = async event => {
+        audioChunks.push(event.data);
+        if (audioChunks.length > 0) {
+            const audioBlob = new Blob(audioChunks, { 'type' : 'audio/webm' });
+            audioChunks = []; // Clear chunks after sending
+
+            const reader = new FileReader();
+            reader.readAsDataURL(audioBlob);
+            reader.onloadend = () => {
+                const base64data = reader.result;
+                google.colab.kernel.invokeFunction('process_audio_chunk', [base64data]);
+            }
+        }
+      };
+
+      mediaRecorder.start(5000); // Emit data every 5 seconds
+      console.log("Audio recording started, emitting data every 5 seconds.");
     }
 
     async function captureFrame() {
@@ -83,13 +127,14 @@ JavaScript to start the webcam and capture frames
       canvas.getContext('2d').drawImage(video, 0, 0);
       return canvas.toDataURL('image/jpeg', 0.8);
     }
-    """    
+    """
 Converts the JavaScript frame to an OpenCV image
 
     def js_to_image(js_reply):
-        image_bytes = b64decode(js_reply.split(',')[1])
+        image_bytes = base64.b64decode(js_reply.split(',')[1])
         jpg_as_np = np.frombuffer(image_bytes, dtype=np.uint8)
         return cv2.imdecode(jpg_as_np, flags=1)
+
 
 --- INITIALIZATION & CONFIGURATION ---
 
@@ -108,7 +153,7 @@ Converts the JavaScript frame to an OpenCV image
 
 --- CORE PROCESSING FUNCTIONS ---
 
-Calculates a movement score based on mouth opening distance
+ Calculates a movement score based on mouth opening distance
 
     def get_facial_movement_score(landmarks):
         points = landmarks.parts()
@@ -162,6 +207,8 @@ Analyzes a single frame for emotions and movements
                 cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
                 cv2.putText(frame, status_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
+Add conditional print statements
+
                 if box_color == (0, 0, 255) or box_color == (0, 255, 255):
                     print(f"   Alert triggered: {status_text}")
                 elif box_color == (0, 255, 0):
@@ -174,7 +221,77 @@ Analyzes a single frame for emotions and movements
                         print(f"🚨 GROUP ALERT: {count} people showing '{emo}'!")
         except: pass
         return frame
-Extracts text, checks for harsh words, and detects shouting in audio/video files
+Analyzes a raw audio data blob for harsh words and shouting
+
+    def analyze_audio_segment_data(audio_data_blob):
+        recognizer = sr.Recognizer()
+        is_shouting = False
+        found_words = []
+        text = ""
+
+        try:
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_data_blob), format="webm") # Assuming webm from JS
+        
+            is_shouting = audio_segment.dBFS > SHOUTING_THRESHOLD_DBFS
+
+            wav_data = io.BytesIO()
+            audio_segment.export(wav_data, format="wav")
+            wav_data.seek(0) # Reset stream position
+
+            with sr.AudioFile(wav_data) as source:
+                audio_data = recognizer.record(source)
+                text = recognizer.recognize_google(audio_data).lower()
+                found_words = [word for word in HARSH_WORDS if word in text]
+
+            return text, found_words, is_shouting
+
+        except sr.UnknownValueError:
+            return None, [], False
+        except Exception as e:
+            print(f"Audio processing error: {e}")
+            return None, [], False
+Callback from JS to receive base64 audio chunks
+
+    def audio_chunk_callback(base64_audio_data):
+        global audio_queue
+        try:
+            header, encoded = base64_audio_data.split(",", 1)
+            decoded_audio = base64.b64decode(encoded)
+            audio_queue.put(decoded_audio)
+        except Exception as e:
+            print(f"Error decoding audio chunk: {e}")
+Function to run in a separate thread for audio analysis
+
+    def audio_processor_loop(stop_event):
+        global audio_queue
+        print("Audio processing thread started.")
+        while not stop_event.is_set():
+            try:
+                audio_data_blob = audio_queue.get(timeout=1) # Get with timeout
+                print(f"   [AUDIO ANALYSIS] Processing audio chunk ({len(audio_data_blob)} bytes)...") # Debug print
+                text, words, is_shouting = analyze_audio_segment_data(audio_data_blob)
+
+                audio_alerts = []
+                if is_shouting and words:
+                    audio_alerts.append("⚠️ SHOUTING DETECTED! Harsh words detected")
+                elif is_shouting:
+                    audio_alerts.append("⚠️ SHOUTING DETECTED! High volume.")
+                elif words:
+                    audio_alerts.append("⚠️ Harsh words detected")
+
+                if audio_alerts:
+                    print(f"\033[1m\033[91m   [AUDIO ANALYSIS] {' '.join(audio_alerts)} Transcription: {text if text else 'N/A'}\033[0m")
+                elif text:
+                    print(f"   [AUDIO ANALYSIS] [✅ CLEAN] Transcription: {text}")
+                else:
+                    print(f"   [AUDIO ANALYSIS] [NO SPEECH/HARSH WORDS DETECTED]") # Debug print
+
+            except queue.Empty:
+                continue # No audio in queue, check stop_event again
+            except Exception as e:
+                print(f"Error in audio processing loop: {e}")
+        print("Audio processing thread stopped.")
+Extracts text, checks for harsh words, and detects shouting in audio/video files.
 
     def process_audio_file(file_path):
         recognizer = sr.Recognizer()
@@ -201,7 +318,7 @@ Extracts text, checks for harsh words, and detects shouting in audio/video files
                 audio_data = recognizer.record(source)
                 text = recognizer.recognize_google(audio_data).lower()
                 found_words = [word for word in HARSH_WORDS if word in text]
-
+    
             return text, found_words, is_shouting
 
         except sr.UnknownValueError:
@@ -214,7 +331,7 @@ Extracts text, checks for harsh words, and detects shouting in audio/video files
 --- MODE 1: DATASET PROCESSING ---
 
 Processes images, videos, and audio files in a directory
-
+    
     def run_dataset_analysis(folder_path):
         if not os.path.exists(folder_path):
             print("❌ Folder not found.")
@@ -283,12 +400,18 @@ Processes images, videos, and audio files in a directory
 Accesses system camera and microphone for real-time analysis (Colab compatible)
 
     def start_live_stream():
-        global stop_signal
-        print("Live detection started. (DeepFace + Dlib)")
+        global stop_signal, audio_processing_thread, audio_queue, audio_stop_event
+        print("Live detection started. (DeepFace + Dlib + Audio Analysis)")
 
         display(Javascript(JS_CODE))
-        eval_js('startWebcam()')
+        eval_js('startWebcam()') # This will now also start audio recording in JS
         register_callback('stop_stream', stop_stream_callback)
+        register_callback('process_audio_chunk', audio_chunk_callback)
+
+        audio_stop_event.clear() # Ensure event is clear at start
+        audio_processing_thread = threading.Thread(target=audio_processor_loop, args=(audio_stop_event,))
+        audio_processing_thread.daemon = True # Allow main program to exit even if thread is running
+        audio_processing_thread.start()
 
         try:
             stop_signal = False # Ensure stop_signal is reset at the start of the try block
@@ -315,6 +438,16 @@ Accesses system camera and microphone for real-time analysis (Colab compatible)
             print("Stream stopped by KeyboardInterrupt.")
         finally:
             stop_signal = False
+            audio_stop_event.set() # Signal audio thread to stop
+            if audio_processing_thread and audio_processing_thread.is_alive():
+                audio_processing_thread.join(timeout=5) # Wait for thread to finish
+                if audio_processing_thread.is_alive():
+                    print("Warning: Audio thread did not terminate gracefully.")
+            while not audio_queue.empty():
+                try:
+                    audio_queue.get_nowait()
+                except queue.Empty:
+                    break
             print("Live detection session ended.")
 
 --- MAIN INTERFACE ---
