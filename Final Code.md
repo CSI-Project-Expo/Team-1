@@ -21,6 +21,9 @@ Import the Libraries
     import queue
     import time
     from google.colab.patches import cv2_imshow
+    from google.colab.output import eval_js, register_callback
+    from base64 import b64decode, b64encode
+    from IPython.display import display, Javascript
     import io
     import base64
 
