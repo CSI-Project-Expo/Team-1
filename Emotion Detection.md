@@ -107,13 +107,14 @@
                         status_text = f"{dom_emotion.capitalize()} ({emotion_confidence:.2f}%)"
    
                     # No console print for normal emotions to avoid clutter
+   
 
    --Draw Visuals--
    
                 cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
                 cv2.putText(frame, status_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2) # Adjusted y-coordinate and font scale
 
-4. Group Analysis
+5. Group Analysis
 
             if len(emotions_in_frame) > 1:
                 counts = Counter(emotions_in_frame)
